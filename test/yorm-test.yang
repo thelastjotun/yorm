@@ -1,0 +1,35 @@
+module yorm-test {
+    namespace "http://yorm.test";
+    prefix yt;
+
+    typedef status-enum {
+        type enumeration {
+            enum UP;
+            enum DOWN;
+        }
+    }
+
+    container server {
+        leaf hostname { type string; }
+        leaf port { type uint16; }
+
+        list users {
+            key "username";
+            leaf username { type string; }
+            leaf status { type status-enum; }
+        }
+    }
+
+    leaf-list tags {
+        type string;
+    }
+
+    rpc reboot {
+        input {
+            leaf delay { type uint32; }
+        }
+        output {
+            leaf success { type boolean; }
+        }
+    }
+}
