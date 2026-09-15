@@ -32,6 +32,7 @@ private:
 
     void generate_leaflist(CppClass &parent_class, const lysc_node_leaflist *list);
     void generate_leaf(CppClass &parent_class, const lysc_node_leaf *leaf);
+    void generate_anydata(CppClass &parent_class, const lysc_node_anydata *anydata);
 
     void generate_rpc(CppClass &parent_class, CppFile &file, const std::string &current_ns, const lysc_node_action *rpc);
 };
