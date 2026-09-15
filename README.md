@@ -16,6 +16,102 @@ The project abstracts away raw XML/JSON tree manipulations, providing a clean, t
   * Native C++ move-semantics and data ownership for `rpc` and `action` outputs.
   * Zero-cost `std::input_iterator` for `lists` and `leaf-list` arrays.
 
+
+## Architecture
+
+YORM's zero-cost abstraction is achieved by generating lightweight wrapper classes that inherit from a base `yorm::Node`. These classes contain no data of their own—only inline methods—and operate exclusively through the abstract `yorm::DataDriver` interface.
+
+### Class Hierarchy
+
+```mermaid
+classDiagram
+    class DataDriver {
+        <<interface>>
+        +get_child_value(void* parent, name, ns)*
+        +has_child(void* parent, name, ns)*
+        +get_node_value(void* node)*
+        ...()
+    }
+
+    class TxDriver {
+        <<interface>>
+        +is_added(void* node)*
+        +is_deleted(void* node)*
+        +is_changed(void* node)*
+    }
+
+    class LibyangDataDriver {
+        -lyd_node** root_
+        +get_child_value(...)*
+        ...()
+    }
+
+    class Node {
+        #DataDriver* driver_
+        #void* data_node_
+        +get_leaf_value(...)
+        +get_optional_leaf_value(...)
+        ...()
+    }
+
+    class yorm_test {
+        <<generated>>
+        +get_server() : server
+        ...()
+    }
+
+    class server {
+        <<generated>>
+        +get_hostname() : optional~string_view~
+        +get_users() : users
+        ...()
+    }
+    
+    DataDriver <|-- LibyangDataDriver
+    TxDriver <|-- LibyangDataDriver
+
+    Node <|-- yorm_test
+    Node <|-- server
+    
+    Node o-- DataDriver : holds pointer to
+```
+
+* **Size**: `yorm::Node` (and all generated descendants) contains exactly two pointers (`driver_` and `data_node_`). Total size: 16 bytes.
+* **Inheritance**: Generated classes like `server` do not add any new fields. Passing `server` by value costs the same as passing two raw pointers.
+* **Decoupling**: The generated classes know absolutely nothing about the libyang C structures. They only talk to the `DataDriver` interface.
+
+### Execution Flow: Reading a Value
+
+When you call `server.get_hostname()`, here is what happens under the hood without any memory allocations:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant server as server (YORM)
+    participant Node as yorm::Node
+    participant Driver as LibyangDataDriver
+    participant CTree as libyang C Tree
+
+    User->>server: get_hostname()
+    
+    server->>Node: get_optional_leaf_value("hostname")
+    
+    Node->>Driver: get_child_value(data_node_, "hostname")
+    
+    Driver->>CTree: find_node(data_node_, "hostname")
+    CTree-->>Driver: void* child
+    
+    Driver->>CTree: get_body(child)
+    CTree-->>Driver: char* "localhost"
+    
+    Driver-->>Node: std::optional<string_view>("localhost")
+    
+    Node-->>server: std::optional<string_view>
+    server-->>User: std::optional<string_view>
+```
+
+Throughout this entire sequence, **no strings are copied** and **no heap memory is allocated**. The `char*` returned by the backend is simply wrapped in a `std::string_view` and passed up to the user.
+
 ## Build Instructions
 
 ### Prerequisites
