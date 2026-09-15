@@ -1,194 +1,277 @@
 #pragma once
 
-#include <memory>
-#include <sstream>
+#include "common.hpp"
+
+#include <charconv>
+#include <functional>
+#include <optional>
+#include <span>
 #include <stdexcept>
-#include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 namespace yorm {
 
+enum class RangeType { List, LeafList };
+
+template<typename T, RangeType Type = RangeType::List>
+class Range;
+
 template<typename T>
-std::string to_string(const T &val)
-{
-    if constexpr (std::is_same_v<T, std::string>) {
-        return val;
-    } else {
-        std::stringstream ss;
-        ss << val;
-        return ss.str();
-    }
-}
+using ListRange = Range<T>;
 
-class TransactionalNode
-{
-public:
-    virtual ~TransactionalNode() = default;
+template<typename T>
+using LeafListRange = Range<T, RangeType::LeafList>;
 
-    virtual bool is_added() const = 0;
-    virtual bool is_deleted() const = 0;
-    virtual bool is_changed() const = 0;
+// ---------------------------------------------------------------------------
+//  DataDriver
+// ---------------------------------------------------------------------------
+class TxDriver;
 
-    virtual bool is_child_added(const std::string &child_name) const = 0;
-    virtual bool is_child_deleted(const std::string &child_name) const = 0;
-    virtual bool is_child_changed(const std::string &child_name) const = 0;
-};
-
-class DataNode
+class DataDriver
 {
 public:
-    virtual ~DataNode() = default;
+    virtual ~DataDriver() = default;
 
-    virtual std::string get_child_value(const std::string &child_name) const = 0;
-    virtual std::shared_ptr<DataNode> get_container(const std::string &name) const = 0;
-    virtual std::vector<std::shared_ptr<DataNode>> get_list_items(const std::string &name) const = 0;
+    virtual std::optional<std::string_view> get_child_value(void *parent, std::string_view child_name, std::string_view ns) const = 0;
+    virtual void *get_child_node(void *parent, std::string_view child_name, std::string_view ns) const = 0;
+    virtual void set_child_value(void *parent, std::string_view child_name, std::string_view value, std::string_view ns) = 0;
+    virtual void delete_child(void *parent, std::string_view child_name, std::string_view ns) = 0;
+    virtual bool has_child(void *parent, std::string_view name, std::string_view ns) const = 0;
 
-    virtual void set_child_value(const std::string &child_name, const std::string &value) = 0;
-    virtual void delete_child(const std::string &child_name) = 0;
-    virtual bool has_child(const std::string &name) const = 0;
-    virtual void create_container(const std::string &name) = 0;
+    virtual void *get_container(void *parent, std::string_view name, std::string_view ns) const = 0;
+    virtual void *create_container(void *parent, std::string_view name, std::string_view ns) = 0;
 
-    virtual std::shared_ptr<DataNode> add_list_item(const std::string &name, const std::vector<std::pair<std::string, std::string>> &keys)
-        = 0;
-    virtual void delete_list_item(const std::string &name, const std::vector<std::pair<std::string, std::string>> &keys) = 0;
+    virtual void *add_list_item(void *parent, std::string_view name, KeyViewList keys, std::string_view ns) = 0;
+    virtual void delete_list_item(void *parent, std::string_view name, KeyViewList keys, std::string_view ns) = 0;
 
-    virtual std::vector<std::string> get_leaflist_values(const std::string &name) const = 0;
-    virtual void add_leaflist_item(const std::string &name, const std::string &value) = 0;
-    virtual void delete_leaflist_item(const std::string &name, const std::string &value) = 0;
+    virtual void add_leaflist_item(void *parent, std::string_view name, std::string_view value, std::string_view ns) = 0;
+    virtual void delete_leaflist_item(void *parent, std::string_view name, std::string_view value, std::string_view ns) = 0;
 
-    virtual std::shared_ptr<DataNode> execute_rpc(const std::string &rpc_name) = 0;
+    virtual void *get_range_first(void *parent, std::string_view name, std::string_view ns) const = 0;
+    virtual void *get_range_next(void *parent, void *current_node, std::string_view name, std::string_view ns) const = 0;
+    virtual std::string_view get_node_value(void *node) const = 0;
+
+    virtual void *execute_rpc(void *parent, std::string_view rpc_name, std::string_view ns) = 0;
+    virtual void free_node(void *node) = 0;
+
+    virtual TxDriver *get_tx_driver() { return nullptr; }
 };
 
+// ---------------------------------------------------------------------------
+//  Node
+// ---------------------------------------------------------------------------
 class Node
 {
 protected:
-    std::shared_ptr<DataNode> data_node_;
+    DataDriver *driver_;
+    void *data_node_;
 
 public:
-    explicit Node(std::shared_ptr<DataNode> data_node)
-        : data_node_{std::move(data_node)}
+    explicit Node(DataDriver &driver)
+        : driver_{&driver}
+        , data_node_{nullptr}
+    {}
+
+    explicit Node(DataDriver *driver, void *data_node = nullptr)
+        : driver_{driver}
+        , data_node_{data_node}
     {
-        if (!data_node_) {
-            throw std::invalid_argument("yorm::Node cannot be constructed with null DataNode");
+        if (!driver_) [[unlikely]] {
+            throw std::invalid_argument("yorm::Node cannot be constructed with null DataDriver");
         }
     }
 
-    std::shared_ptr<DataNode> get_data_node() const { return data_node_; }
+    DataDriver *get_driver() const { return driver_; }
+    void *get_data_node() const { return data_node_; }
+
+private:
+    template<typename Func, typename T, typename... Args>
+    inline void write_value_helper(Func &&driver_method, std::string_view name, std::string_view ns, T &&value, Args &&...extra_args)
+    {
+        using raw_t = std::decay_t<T>;
+
+        if constexpr (std::is_same_v<raw_t, std::string_view> || std::is_same_v<raw_t, std::string>) {
+            std::invoke(driver_method, driver_, data_node_, name, std::forward<T>(value), ns, std::forward<Args>(extra_args)...);
+        } else if constexpr (std::is_same_v<raw_t, bool>) {
+            std::invoke(driver_method, driver_, data_node_, name, value ? "true" : "false", ns, std::forward<Args>(extra_args)...);
+        } else {
+            char buf[max_numeric_buffer_size];
+            auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), value);
+            if (ec == std::errc{}) [[likely]] {
+                std::invoke(driver_method, driver_, data_node_, name, std::string_view(buf, ptr - buf), ns, std::forward<Args>(extra_args)...);
+            }
+        }
+    }
 
 protected:
     // --- Leafs ---
     template<typename T>
-    T get_leaf_value(const std::string &child_name) const
+    std::optional<T> get_optional_leaf_value(std::string_view child_name, std::string_view ns = "") const
     {
-        std::string str_val = data_node_->get_child_value(child_name);
-
-        if constexpr (std::is_same_v<T, std::string>) {
-            return str_val;
-        } else {
-            T result;
-            std::stringstream ss(str_val);
-            ss >> result;
-            return result;
+        if (!data_node_ || !driver_) [[unlikely]] {
+            return std::nullopt;
         }
+
+        auto val = driver_->get_child_value(data_node_, child_name, ns);
+        if (!val) {
+            return std::nullopt;
+        }
+
+        return from_string_view<T>(*val);
     }
 
     template<typename T>
-    void set_leaf_value(const std::string &child_name, const T &value)
+    T get_leaf_value(std::string_view child_name, std::string_view ns = "") const
     {
-        if constexpr (std::is_same_v<T, std::string>) {
-            data_node_->set_child_value(child_name, value);
-        } else {
-            std::stringstream ss;
-            ss << value;
-            data_node_->set_child_value(child_name, ss.str());
-        }
+        auto val = get_optional_leaf_value<T>(child_name, ns);
+        return val ? *val : T{};
     }
 
-    void delete_leaf(const std::string &child_name) { data_node_->delete_child(child_name); }
+    template<typename T>
+    void set_leaf_value(std::string_view child_name, const T &value, std::string_view ns = "")
+    {
+        write_value_helper(&DataDriver::set_child_value, child_name, ns, value);
+    }
+
+    void delete_leaf(std::string_view child_name, std::string_view ns = "") { driver_->delete_child(data_node_, child_name, ns); }
 
     // --- Containers ---
     template<typename T>
-    T get_container(const std::string &name) const
+    T get_container(std::string_view name, std::string_view ns = "") const
     {
-        return T{data_node_->get_container(name)};
+        return T{driver_, driver_->get_container(data_node_, name, ns)};
     }
 
-    void create_container(const std::string &name) { data_node_->create_container(name); }
-    
-    void delete_container(const std::string &name) { data_node_->delete_child(name); }
-    
+    void create_container(std::string_view name, std::string_view ns = "") { driver_->create_container(data_node_, name, ns); }
+
+    void delete_container(std::string_view name, std::string_view ns = "") { driver_->delete_child(data_node_, name, ns); }
+
     // --- Common ---
-    bool has_child(const std::string &name) const { return data_node_->has_child(name); }
+    bool has_child(std::string_view name, std::string_view ns = "") const { return driver_->has_child(data_node_, name, ns); }
 
     // --- Lists ---
     template<typename T>
-    std::vector<T> get_list_items(const std::string &name) const
+    ListRange<T> get_list_items(std::string_view name, std::string_view ns = "") const
     {
-        auto data_node_list = data_node_->get_list_items(name);
-
-        std::vector<T> result;
-        result.reserve(data_node_list.size());
-
-        for (const auto &item : data_node_list) {
-            result.emplace_back(item);
-        }
-
-        return result;
+        return ListRange<T>{driver_, data_node_, name, ns};
     }
 
     template<typename T>
-    T add_list_item(const std::string &name, const std::vector<std::pair<std::string, std::string>> &keys)
+    T add_list_item(std::string_view name, KeyViewList keys, std::string_view ns = "")
     {
-        return T{data_node_->add_list_item(name, keys)};
+        return T{driver_, driver_->add_list_item(data_node_, name, keys, ns)};
     }
 
-    void delete_list_item(const std::string &name, const std::vector<std::pair<std::string, std::string>> &keys)
+    void delete_list_item(std::string_view name, KeyViewList keys, std::string_view ns = "")
     {
-        data_node_->delete_list_item(name, keys);
+        driver_->delete_list_item(data_node_, name, keys, ns);
     }
 
     // --- Leaf-lists ---
     template<typename T>
-    std::vector<T> get_leaflist(const std::string &name) const
+    LeafListRange<T> get_leaflist(std::string_view name, std::string_view ns = "") const
     {
-        auto raw_values = data_node_->get_leaflist_values(name);
-        std::vector<T> result;
-        result.reserve(raw_values.size());
-        for (const auto &str_val : raw_values) {
-            if constexpr (std::is_same_v<T, std::string>) {
-                result.push_back(str_val);
-            } else {
-                T val;
-                std::stringstream ss(str_val);
-                ss >> val;
-                result.push_back(val);
-            }
-        }
-        return result;
+        return LeafListRange<T>{driver_, data_node_, name, ns};
     }
 
     template<typename T>
-    void add_leaflist_item(const std::string &name, const T &value)
+    void add_leaflist_item(std::string_view name, const T &value, std::string_view ns = "")
     {
-        data_node_->add_leaflist_item(name, yorm::to_string(value));
+        write_value_helper(&DataDriver::add_leaflist_item, name, ns, value);
     }
 
     template<typename T>
-    void delete_leaflist_item(const std::string &name, const T &value)
+    void delete_leaflist_item(std::string_view name, const T &value, std::string_view ns = "")
     {
-        data_node_->delete_leaflist_item(name, yorm::to_string(value));
+        write_value_helper(&DataDriver::delete_leaflist_item, name, ns, value);
     }
 
     template<typename T>
-    void set_leaflist(const std::string &name, const std::vector<T> &values)
+    void set_leaflist(std::string_view name, std::span<const T> values, std::string_view ns = "")
     {
-        data_node_->delete_child(name);
-        for (const auto &v : values) {
-            data_node_->add_leaflist_item(name, yorm::to_string(v));
+        driver_->delete_child(data_node_, name, ns);
+        for (const auto &value : values) {
+            write_value_helper(&DataDriver::add_leaflist_item, name, ns, value);
         }
     }
 };
 
+// ---------------------------------------------------------------------------
+//  Range
+// ---------------------------------------------------------------------------
+template<typename T, RangeType Type>
+class Range final
+{
+private:
+    DataDriver *driver_;
+    void *parent_node_;
+    std::string_view name_;
+    std::string_view ns_;
+
+public:
+    class Iterator
+    {
+    private:
+        DataDriver *driver_;
+        void *parent_node_;
+        std::string_view name_;
+        std::string_view ns_;
+        void *current_;
+
+    public:
+        using iterator_category = std::input_iterator_tag;
+        using value_type = T;
+        using difference_type = std::ptrdiff_t;
+        using pointer = void;
+        using reference = T;
+
+        Iterator() = default;
+        Iterator(DataDriver *driver, void *parent_node, std::string_view name, std::string_view ns, void *node)
+            : driver_(driver)
+            , parent_node_(parent_node)
+            , name_(name)
+            , ns_(ns)
+            , current_(node)
+        {}
+
+        inline reference operator*() const
+        {
+            if constexpr (Type == RangeType::LeafList) {
+                return from_string_view<T>(driver_->get_node_value(current_));
+            } else {
+                return T{driver_, current_};
+            }
+        }
+
+        Iterator &operator++()
+        {
+            current_ = driver_->get_range_next(parent_node_, current_, name_, ns_);
+            return *this;
+        }
+
+        Iterator operator++(int)
+        {
+            Iterator tmp = *this;
+            current_ = driver_->get_range_next(parent_node_, current_, name_, ns_);
+            return tmp;
+        }
+
+        bool operator==(const Iterator &other) const { return current_ == other.current_; }
+        bool operator!=(const Iterator &other) const { return current_ != other.current_; }
+    };
+
+    Range(DataDriver *driver, void *parent_node, std::string_view name, std::string_view ns = "")
+        : driver_(driver)
+        , parent_node_(parent_node)
+        , name_(name)
+        , ns_(ns)
+    {}
+
+    Iterator begin() const { return Iterator(driver_, parent_node_, name_, ns_, driver_->get_range_first(parent_node_, name_, ns_)); }
+    Iterator end() const { return Iterator(driver_, parent_node_, name_, ns_, nullptr); }
+};
+
+// ---------------------------------------------------------------------------
 } // namespace yorm

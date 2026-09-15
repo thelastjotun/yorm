@@ -13,6 +13,7 @@ struct CppEnum final
         std::string yang_name;
         std::string cpp_name;
     };
+
     std::vector<EnumValue> values;
 
     std::string render(int indent_level = 0) const
@@ -26,7 +27,7 @@ struct CppEnum final
         }
         fmt::format_to(std::back_inserter(rendered), "{}}};\n\n", indent);
 
-        fmt::format_to(std::back_inserter(rendered), "{}static std::string to_string({} val) {{\n", indent, name);
+        fmt::format_to(std::back_inserter(rendered), "{}static std::string_view to_string_view({} val) {{\n", indent, name);
         fmt::format_to(std::back_inserter(rendered), "{}\tswitch(val) {{\n", indent);
         for (const auto &val : values) {
             fmt::format_to(std::back_inserter(rendered), "{}\t\tcase {}::{}: return \"{}\";\n", indent, name, val.cpp_name, val.yang_name);
@@ -35,7 +36,7 @@ struct CppEnum final
         fmt::format_to(std::back_inserter(rendered), "{}\t}}\n", indent);
         fmt::format_to(std::back_inserter(rendered), "{}}}\n\n", indent);
 
-        fmt::format_to(std::back_inserter(rendered), "{}static {} string_to_{}(const std::string& str) {{\n", indent, name, name);
+        fmt::format_to(std::back_inserter(rendered), "{}static {} string_view_to_{}(std::string_view str) {{\n", indent, name, name);
         for (const auto &val : values) {
             fmt::format_to(std::back_inserter(rendered), "{}\tif (str == \"{}\") return {}::{};\n", indent, val.yang_name, name, val.cpp_name);
         }

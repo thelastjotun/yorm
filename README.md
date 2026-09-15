@@ -1,20 +1,116 @@
 # YORM (YANG Object-Relational Mapping)
 
-YORM is a lightweight, backend-agnostic C++ code generator and framework designed to interact with YANG data models using strictly typed C++20 objects. 
+YORM is a backend-agnostic C++ code generator and framework designed to interact with YANG data models using strictly typed C++20 objects. 
 
-The project abstracts away raw XML/JSON tree manipulations, providing a clean, type-safe, and compile-time validated interface. It allows you to build your business logic entirely decoupled from underlying daemons.
+The project abstracts away raw XML/JSON tree manipulations, providing a clean, type-safe, and compile-time validated interface. It allows you to build your business logic entirely decoupled from underlying daemons without any overhead or heap allocations during tree traversal.
 
 ## Features
 
-* **Strict Typing & Flat Namespaces**: Navigation and data access are performed via generated C++ methods (`config.get_server()`).
-* **Backend Agnostic**: The generated C++ code is independent of specific backends. All data access is encapsulated behind the abstract `yorm::DataNode` interface. You can inject a JSON parser, an XML tree, or an in-memory mock.
-* **Compile-Time Safety (`struct fields`)**: YORM generates struct members for YANG properties (e.g., `yorm_test::fields::server`), eliminating "magic strings" and ensuring code won't compile if the YANG schema changes.
-* **Transaction Isolation (`yorm::tx`)**: YORM separates data access from state changes. Use `yorm::tx` wrapper to check commit flags or transaction states independently of the data value.
+* **Absolute Zero-Cost Abstraction**: YORM generated objects are essentially lightweight 16-byte wrappers (`DataDriver *` + `void *`). Iterating through massive YANG lists or reading properties requires **zero** C++ heap allocations.
+* **Strict Typing**: Navigation and data access are performed via strictly generated C++ methods (`config.get_server().get_hostname()`).
+* **Backend Agnostic**: The generated C++ code is independent of specific backends. All data access is encapsulated behind the abstract `yorm::DataDriver` interface. You can inject a JSON parser, an XML tree, Sysrepo, or an in-memory mock.
+* **Compile-Time Safety (`struct fields`)**: YORM generates `constexpr std::string_view` struct members for YANG properties (e.g., `yorm_test::fields::server`), eliminating "magic strings" and ensuring code won't compile if the YANG schema changes.
 * **Complex YANG Types Support**:
   * Unpacking of `choice` / `case` constructs transparently.
   * Generation of C++ `enum class` for YANG `enumeration` with string conversion utilities.
-  * Support for `rpc` and `action` nodes.
-  * Support for `containers`, `lists`, `leafs`, and `leaf-list` arrays.
+  * Native C++ move-semantics and data ownership for `rpc` and `action` outputs.
+  * Zero-cost `std::input_iterator` for `lists` and `leaf-list` arrays.
+
+
+## Architecture
+
+YORM's zero-cost abstraction is achieved by generating lightweight wrapper classes that inherit from a base `yorm::Node`. These classes contain no data of their own, only inline methods and operate exclusively through the abstract `yorm::DataDriver` interface.
+
+### Class Hierarchy
+
+```mermaid
+classDiagram
+    class DataDriver {
+        <<interface>>
+        + get_child_value(void* parent, name, ns)*
+        + has_child(void* parent, name, ns)*
+        + get_node_value(void* node)*
+        ...()
+    }
+
+    class TxDriver {
+        <<interface>>
+        + is_added(void* node)*
+        + is_deleted(void* node)*
+        + is_changed(void* node)*
+    }
+
+    class LibyangDataDriver {
+        - lyd_node** root_
+        + get_child_value(...)*
+        ...()
+    }
+
+    class Node {
+        # DataDriver* driver_
+        # void* data_node_
+        + get_leaf_value(...)
+        + get_optional_leaf_value(...)
+        ...()
+    }
+
+    class yorm_test {
+        <<generated>>
+        + get_server() : server
+        ...()
+    }
+
+    class server {
+        <<generated>>
+        + get_hostname() : optional~string_view~
+        + get_users() : users
+        ...()
+    }
+    
+    DataDriver <|-- LibyangDataDriver
+    TxDriver <|-- LibyangDataDriver
+
+    Node <|-- yorm_test
+    Node <|-- server
+    
+    Node o-- DataDriver
+```
+
+* **Size**: `yorm::Node` (and all generated descendants) contains exactly two pointers (`driver_` and `data_node_`). Total size: 16 bytes.
+* **Inheritance**: Generated classes like `server` do not add any new fields. Passing `server` by value costs the same as passing two raw pointers.
+* **Decoupling**: The generated classes know absolutely nothing about the libyang C structures. They only talk to the `DataDriver` interface.
+
+### Execution Flow: Reading a Value
+
+When you call `server.get_hostname()`, here is what happens under the hood without any memory allocations:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant server as server (YORM)
+    participant Node as yorm::Node
+    participant Driver as LibyangDataDriver
+    participant CTree as libyang C Tree
+
+    User->>server: get_hostname()
+    
+    server->>Node: get_optional_leaf_value("hostname")
+    
+    Node->>Driver: get_child_value(data_node_, "hostname")
+    
+    Driver->>CTree: find_node(data_node_, "hostname")
+    CTree-->>Driver: void* child
+    
+    Driver->>CTree: get_body(child)
+    CTree-->>Driver: char* "localhost"
+    
+    Driver-->>Node: std::optional<string_view>("localhost")
+    
+    Node-->>server: std::optional<string_view>
+    server-->>User: std::optional<string_view>
+```
+
+Throughout this entire sequence, **no strings are copied** and **no heap memory is allocated**. The `char*` returned by the backend is simply wrapped in a `std::string_view` and passed up to the user.
 
 ## Build Instructions
 
@@ -91,39 +187,57 @@ target_include_directories(my_backend PRIVATE ${OUTPUT_DIR} third_party/yorm/src
 
 ## Implementing a Custom Driver
 
-Because YORM is framework-agnostic, you implement your own driver by inheriting from `yorm::DataNode`. 
+Because YORM is framework-agnostic and relies on zero-cost `void*` pointers for tree nodes, you implement your own backend driver by inheriting from `yorm::DataDriver`.
 
 ```cpp
 #include "yorm/node.hpp"
-#include <memory>
+#include <string_view>
 
-class MyJsonDataNode : public yorm::DataNode {
+class MyJsonDataDriver final : public yorm::DataDriver {
 public:
-    MyJsonDataNode(JsonNode* internal_node) : node_(internal_node) {}
-
-    // Implement pure virtual methods (get_child_value, get_list_items, etc...)
-    std::string get_child_value(const std::string& name) const override {
-        return node_->find(name).as_string();
+    // ... implement pure virtual methods
+    
+    std::string_view get_child_value(void* parent, std::string_view name, std::string_view ns) const override {
+        JsonNode* node = static_cast<JsonNode*>(parent);
+        JsonNode* child = node->find(name);
+        return child ? std::string_view(child->as_cstring()) : "";
     }
     
-    // ...
-private:
-    JsonNode* node_;
+    void* get_container(void* parent, std::string_view name, std::string_view ns) const override {
+        JsonNode* node = static_cast<JsonNode*>(parent);
+        return node->find(name);
+    }
+    
+    // ... iterators, list keys, RPCs, etc.
 };
 ```
 
-Then simply inject it into the generated C++ model:
+Then simply inject it into the generated C++ model on the stack:
 
 ```cpp
 #include "yorm_test.hpp" // Generated by yorm-gen
 
 void process_config(JsonNode* root_json) {
-    auto driver = std::make_shared<MyJsonDataNode>(root_json);
-    yorm_gen::yorm_test config(driver);
+    // 1. Initialize your driver
+    MyJsonDataDriver driver;
     
+    // 2. Wrap the root node in the YORM facade
+    yorm_gen::yorm_test config(&driver, root_json);
+    
+    // 3. Enjoy zero-cost native C++ interactions!
     if (config.has_server()) {
-        std::string host = config.get_server().get_hostname();
-        // Custom backend logic goes here...
+        auto server = config.get_server();
+        std::string_view host = server.get_hostname();
+        
+        for (auto user : server.get_users_list()) {
+            // No allocations happen during this loop!
+        }
     }
 }
 ```
+
+## Design Philosophy & Limitations
+
+YORM is built for extreme performance and minimal overhead, which comes with certain architectural trade-offs:
+
+1. **Memory Ownership**: YORM objects (like `Node`, `Range`, `tx`) are strictly non-owning, bare wrappers. They hold raw `void*` pointers to the underlying backend tree. **YORM does not manage the lifetime of the data tree**. It is entirely the developer's responsibility to ensure the backend tree outlives the YORM objects.

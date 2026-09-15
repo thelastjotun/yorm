@@ -7,7 +7,7 @@ extern "C" {
 #include <libyang.h>
 }
 
-std::string sanitize_name(std::string name)
+inline std::string sanitize_name(std::string name)
 {
     if (name.empty()) {
         return name;
@@ -21,15 +21,15 @@ std::string sanitize_name(std::string name)
     return name;
 }
 
-std::string get_cpp_type(const lysc_type *type)
+inline std::string get_cpp_type(const lysc_type *type)
 {
     if (!type) {
-        return "std::string";
+        return "std::string_view";
     }
 
     switch (type->basetype) {
     case LY_TYPE_STRING:
-        return "std::string";
+        return "std::string_view";
     case LY_TYPE_UINT16:
         return "uint16_t";
     case LY_TYPE_UINT32:
@@ -40,8 +40,10 @@ std::string get_cpp_type(const lysc_type *type)
         return "int32_t";
     case LY_TYPE_BOOL:
         return "bool";
+    case LY_TYPE_DEC64:
+        return "double";
 
     default:
-        return "std::string";
+        return "std::string_view";
     }
 }
