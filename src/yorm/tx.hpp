@@ -1,38 +1,45 @@
 #pragma once
 
-#include "node.hpp"
-#include <memory>
+#include <concepts>
 #include <stdexcept>
-#include <string>
+#include <yorm/node.hpp>
 
 namespace yorm {
 
-class TxWrapper
+class TxDriver
 {
-    std::shared_ptr<TransactionalNode> tx_node_;
+public:
+    virtual ~TxDriver() = default;
+    virtual bool is_added(void *node) const = 0;
+    virtual bool is_deleted(void *node) const = 0;
+    virtual bool is_changed(void *node) const = 0;
+};
+
+template <typename T>
+concept IsYormNode = requires(T node) {
+    { node.get_data_node() } -> std::same_as<void*>;
+    { node.get_driver() } -> std::convertible_to<DataDriver*>;
+};
+
+template <IsYormNode T>
+class tx
+{
+    TxDriver *tx_driver_;
+    void *node_;
 
 public:
-    explicit TxWrapper(const Node &node)
+    explicit tx(const T &node)
+        : node_(node.get_data_node())
     {
-        tx_node_ = std::dynamic_pointer_cast<TransactionalNode>(node.get_data_node());
-
-        if (!tx_node_) {
-            throw std::runtime_error("This node does not support transactions.");
+        tx_driver_ = node.get_driver()->get_tx_driver();
+        if (!tx_driver_) [[unlikely]] {
+            throw std::runtime_error("yorm::tx: DataDriver does not support transactions!");
         }
     }
 
-    bool is_added() const { return tx_node_->is_added(); }
-    bool is_deleted() const { return tx_node_->is_deleted(); }
-    bool is_changed() const { return tx_node_->is_changed(); }
-
-    bool is_child_added(const std::string &child_name) const { return tx_node_->is_child_added(child_name); }
-    bool is_child_deleted(const std::string &child_name) const { return tx_node_->is_child_deleted(child_name); }
-    bool is_child_changed(const std::string &child_name) const { return tx_node_->is_child_changed(child_name); }
+    bool is_added() const { return tx_driver_->is_added(node_); }
+    bool is_deleted() const { return tx_driver_->is_deleted(node_); }
+    bool is_changed() const { return tx_driver_->is_changed(node_); }
 };
-
-inline TxWrapper tx(const Node &node)
-{
-    return TxWrapper(node);
-}
 
 } // namespace yorm
