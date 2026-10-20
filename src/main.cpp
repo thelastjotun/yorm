@@ -23,7 +23,9 @@ int main(int argc, char **argv)
             std::string yang_file = argv[i];
 
             std::string stem = std::filesystem::path(yang_file).stem().string();
-            std::replace(stem.begin(), stem.end(), '@', '_');
+            if (auto pos = stem.find('@'); pos != std::string::npos) {
+                stem.erase(pos);
+            }
             std::replace(stem.begin(), stem.end(), '-', '_');
 
             CppFile file_res = parser.parse_module(yang_file);

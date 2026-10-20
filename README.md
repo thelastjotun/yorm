@@ -137,7 +137,7 @@ The `yorm-gen` tool generates a distinct `.hpp` header file for each input YANG 
 yorm-gen <output_dir> <yang_search_dir> <yang_file1> [yang_file2...]
 ```
 * `<output_dir>`: Destination directory for the generated headers.
-* `<yang_search_dir>`: Directory containing imported YANG models (required by libyang to resolve `typedef` and `uses`). **Note**: This directory MUST also contain standard YANG models (e.g., `ietf-inet-types.yang`, `yang.yang`) if they are referenced.
+* `<yang_search_dir>`: Directory containing imported YANG models (required by libyang to resolve `typedef` and `uses`).
 * `<yang_file...>`: A space-separated list of YANG files to process.
 
 ## CMake Integration
@@ -160,8 +160,8 @@ file(GLOB YANG_FILES "${YANG_DIR}/*.yang")
 set(GENERATED_HEADERS "")
 foreach(YANG_FILE ${YANG_FILES})
     get_filename_component(BASENAME ${YANG_FILE} NAME_WE)
-    string(REPLACE "-" "_" CPP_NAME ${BASENAME})
-    string(REPLACE "@" "_" CPP_NAME ${CPP_NAME})
+    string(REGEX REPLACE "@.*" "" CPP_NAME ${BASENAME})
+    string(REPLACE "-" "_" CPP_NAME ${CPP_NAME})
     list(APPEND GENERATED_HEADERS "${OUTPUT_DIR}/${CPP_NAME}.hpp")
 endforeach()
 

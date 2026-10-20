@@ -2,10 +2,10 @@ extern "C" {
 #include <libyang.h>
 }
 #include "libyang_data_driver.hpp"
-#include <yorm/tx.hpp>
 #include "yorm_test.hpp"
 #include <cassert>
 #include <iostream>
+#include <yorm/tx.hpp>
 
 #define RUN_TEST(name) \
     std::cout << "[TEST] " << #name << "..." << std::endl; \
@@ -144,7 +144,7 @@ void test_rpc_operations()
 
 int main()
 {
-    if (ly_ctx_new("submodules/libyang/modules", 0, &global_ctx) != LY_SUCCESS) {
+    if (ly_ctx_new(nullptr, 0, &global_ctx) != LY_SUCCESS) {
         std::cerr << "Failed to create context\n";
         return 1;
     }
